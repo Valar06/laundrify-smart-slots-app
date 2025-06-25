@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -17,12 +16,21 @@ interface ClothingItem {
   quantity: number;
 }
 
+interface TimeSlot {
+  id: string;
+  time_range: string;
+  current_bookings: number;
+  max_capacity: number;
+  date: string;
+  is_active: boolean;
+}
+
 const BookSlot = () => {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
     studentName: "",
     roomNumber: "",
-    phoneNumber: localStorage.getItem("userPhone") || "",
+    phoneNumber: "",
     laundryType: "normal",
     preferredDate: "",
     preferredTime: "",
@@ -40,27 +48,56 @@ const BookSlot = () => {
     { type: "skirts", quantity: 0 },
     { type: "others", quantity: 0 }
   ]);
-  const [availableSlots, setAvailableSlots] = useState<any[]>([]);
+  const [availableSlots, setAvailableSlots] = useState<TimeSlot[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Initialize phone number from localStorage on component mount
+  useEffect(() => {
+    const userPhone = localStorage.getItem("userPhone");
+    if (userPhone) {
+      setFormData(prev => ({
+        ...prev,
+        phoneNumber: userPhone
+      }));
+    }
+  }, []);
 
   useEffect(() => {
     loadAvailableSlots();
   }, [formData.preferredDate]);
 
   const loadAvailableSlots = async () => {
-    if (!formData.preferredDate) return;
+    if (!formData.preferredDate) {
+      setAvailableSlots([]);
+      return;
+    }
     
     try {
-      const { data: slots } = await supabase
+      const { data: slots, error } = await supabase
         .from('time_slots')
         .select('*')
         .eq('date', formData.preferredDate)
         .eq('is_active', true)
         .order('time_range');
       
+      if (error) {
+        console.error('Error loading slots:', error);
+        toast({
+          title: "Error",
+          description: "Failed to load available time slots",
+          variant: "destructive"
+        });
+        return;
+      }
+      
       setAvailableSlots(slots || []);
     } catch (error) {
       console.error('Error loading slots:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load available time slots",
+        variant: "destructive"
+      });
     }
   };
 
@@ -92,6 +129,7 @@ const BookSlot = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Validation
     if (!formData.studentName || !formData.roomNumber || !formData.preferredDate || !formData.preferredTime) {
       toast({
         title: "Missing Information",
@@ -123,28 +161,52 @@ const BookSlot = () => {
     setLoading(true);
 
     try {
-     const {
-  data: { user },
-  error: userError
-} = await supabase.auth.getUser();
+      // Get current user
+      const {
+        data: { user },
+        error: userError
+      } = await supabase.auth.getUser();
 
-if (userError || !user) {
-  toast({
-    title: "Authentication Error",
-    description: "Please login again",
-    variant: "destructive"
-  });
-  setLoading(false);
-  return;
-}
+      if (userError || !user) {
+        toast({
+          title: "Authentication Error",
+          description: "Please login again",
+          variant: "destructive"
+        });
+        setLoading(false);
+        return;
+      }
 
-const userId = user.id;
+      const userId = user.id;
 
+      // Generate unique IDs
       const orderId = crypto.randomUUID();
       const barcode = `LDY${Date.now().toString().slice(-8)}`;
       
       // Find the selected slot
       const selectedSlot = availableSlots.find(slot => slot.time_range === formData.preferredTime);
+      
+      if (!selectedSlot) {
+        toast({
+          title: "Invalid Time Slot",
+          description: "Please select a valid time slot",
+          variant: "destructive"
+        });
+        setLoading(false);
+        return;
+      }
+
+      // Check if slot is still available
+      if (selectedSlot.current_bookings >= selectedSlot.max_capacity) {
+        toast({
+          title: "Slot Full",
+          description: "This time slot is now full. Please select another time.",
+          variant: "destructive"
+        });
+        setLoading(false);
+        await loadAvailableSlots(); // Refresh slots
+        return;
+      }
       
       // Create the order
       const { error: orderError } = await supabase
@@ -160,11 +222,13 @@ const userId = user.id;
           preferred_time: formData.preferredTime,
           special_instructions: formData.specialInstructions,
           barcode: barcode,
-          slot_id: selectedSlot?.id,
+          slot_id: selectedSlot.id,
           status: 'pending'
         }]);
 
-      if (orderError) throw orderError;
+      if (orderError) {
+        throw new Error(`Order creation failed: ${orderError.message}`);
+      }
 
       // Add clothing items
       const clothingInserts = clothingItems
@@ -180,7 +244,9 @@ const userId = user.id;
           .from('clothing_items')
           .insert(clothingInserts);
 
-        if (clothingError) throw clothingError;
+        if (clothingError) {
+          throw new Error(`Clothing items creation failed: ${clothingError.message}`);
+        }
       }
 
       toast({
@@ -193,12 +259,12 @@ const userId = user.id;
       console.error('Booking error:', error);
       toast({
         title: "Booking Failed",
-        description: "Please try again later",
+        description: error instanceof Error ? error.message : "Please try again later",
         variant: "destructive"
       });
+    } finally {
+      setLoading(false);
     }
-    
-    setLoading(false);
   };
 
   return (
@@ -344,11 +410,22 @@ const userId = user.id;
                       <SelectValue placeholder="Select time slot" />
                     </SelectTrigger>
                     <SelectContent>
-                      {availableSlots.map((slot) => (
-                        <SelectItem key={slot.id} value={slot.time_range}>
-                          {slot.time_range} ({slot.current_bookings}/{slot.max_capacity} booked)
+                      {availableSlots.length === 0 ? (
+                        <SelectItem value="" disabled>
+                          {formData.preferredDate ? "No slots available" : "Select a date first"}
                         </SelectItem>
-                      ))}
+                      ) : (
+                        availableSlots.map((slot) => (
+                          <SelectItem 
+                            key={slot.id} 
+                            value={slot.time_range}
+                            disabled={slot.current_bookings >= slot.max_capacity}
+                          >
+                            {slot.time_range} ({slot.current_bookings}/{slot.max_capacity} booked)
+                            {slot.current_bookings >= slot.max_capacity && " - FULL"}
+                          </SelectItem>
+                        ))
+                      )}
                     </SelectContent>
                   </Select>
                 </div>
@@ -369,7 +446,7 @@ const userId = user.id;
 
               <Button
                 type="submit"
-                disabled={loading || getTotalItems() === 0}
+                disabled={loading || getTotalItems() === 0 || !formData.preferredTime}
                 className="w-full bg-purple-600 hover:bg-purple-700 rounded-xl h-12"
               >
                 {loading ? "Booking..." : "Confirm Booking"}
